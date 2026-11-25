@@ -3,7 +3,8 @@
 Discovers accessible inference models across:
 1. Antigravity Host Native CLI (authenticated host environment, zero external keys)
 2. Configured API Providers (OpenAI, DeepSeek, OpenRouter) via Keyring and environment
-3. Local inference runtimes (Ollama, LM Studio)
+3. Local inference runtimes (Ollama)
+4. Saved LM Studio and custom OpenAI-compatible providers from ProviderStorage
 """
 
 from __future__ import annotations
@@ -344,6 +345,48 @@ def discover_all_models(
                 description="Local Endpoint (Ollama not running)",
             )
         )
+
+    # 8. Saved LM Studio and custom OpenAI-compatible providers
+    # These providers have no fixed model list: the model served comes from
+    # the saved record in ProviderStorage, so surface each configured
+    # record as an available model. Neither preset requires an API key, so
+    # a saved record is listed as ready. Storage stand-ins used by older
+    # tests may not offer list_providers; skip this section in that case
+    # instead of failing discovery for every other provider.
+    list_saved_providers = getattr(storage, "list_providers", None)
+    if callable(list_saved_providers):
+        try:
+            saved_providers = list_saved_providers()
+        except Exception:
+            saved_providers = []
+        for saved in saved_providers or []:
+            provider_key = (getattr(saved, "name", "") or "").strip().lower()
+            if provider_key not in ("lmstudio", "custom"):
+                continue
+            model_id = (getattr(saved, "model", "") or "").strip()
+            if not model_id or model_id in seen_ids:
+                continue
+            if provider_key == "lmstudio":
+                display_name = f"LM Studio {model_id}"
+                description = "Local Endpoint · LM Studio"
+                status_label = "Ready · Local Endpoint"
+            else:
+                display_name = f"Custom {model_id}"
+                description = "Custom OpenAI-Compatible Endpoint"
+                status_label = "Ready · Custom Endpoint"
+            models.append(
+                DiscoveredModel(
+                    id=model_id,
+                    name=display_name,
+                    provider=provider_key,
+                    tier="fast",
+                    is_available=True,
+                    status_label=status_label,
+                    status_tag="ready_key",
+                    description=description,
+                )
+            )
+            seen_ids.add(model_id)
 
     _cached_discovery = models
     return list(models)

@@ -2,13 +2,13 @@
 
 from unittest.mock import patch
 
-
 from argus.config import ArgusConfig
 from argus.providers.discovery import (
     DiscoveredModel,
     discover_all_models,
     resolve_dynamic_tiers,
 )
+from argus.providers.models import ProviderConfig
 from argus.tui.modals.config import ConfigModal
 from argus.tui.modals.policy import PolicyModal
 
@@ -259,3 +259,85 @@ def test_gemini_key_models_keep_option_ids_unique_with_host_gemini():
 def test_no_gemini_key_models_listed_with_host_cli_and_no_key():
     models = _discover_with_host(["claude-sonnet-4-6"], gemini_key=None)
     assert not [m for m in models if m.provider == "gemini"]
+
+
+class _SavedProviderStorage:
+    """Minimal ProviderStorage stand-in holding saved provider records."""
+
+    def __init__(self, saved):
+        self._saved = saved
+
+    def get_api_key(self, provider):
+        return None
+
+    def list_providers(self):
+        return list(self._saved)
+
+
+def _discover_with_saved_providers(saved):
+    with patch("argus.providers.discovery.is_antigravity_cli_available", return_value=False):
+        return discover_all_models(
+            storage=_SavedProviderStorage(saved), force_refresh=True, probe_ollama=False
+        )
+
+
+def test_saved_lmstudio_and_custom_providers_discovered():
+    saved = [
+        ProviderConfig(name="lmstudio", base_url="http://localhost:1234/v1", model="qwen3-8b"),
+        ProviderConfig(name="custom", base_url="http://localhost:8000/v1", model="my-custom-model"),
+    ]
+    models = _discover_with_saved_providers(saved)
+    by_provider = {m.provider: m for m in models if m.provider in ("lmstudio", "custom")}
+    assert set(by_provider) == {"lmstudio", "custom"}
+
+    lmstudio = by_provider["lmstudio"]
+    assert lmstudio.model_id == "qwen3-8b"
+    assert lmstudio.is_available
+    assert lmstudio.status_tag == "ready_key"
+    assert lmstudio.status_label == "Ready · Local Endpoint"
+
+    custom = by_provider["custom"]
+    assert custom.model_id == "my-custom-model"
+    assert custom.is_available
+    assert custom.status_tag == "ready_key"
+    assert custom.status_label == "Ready · Custom Endpoint"
+
+
+def test_no_saved_lmstudio_or_custom_providers_means_none_listed():
+    saved = [ProviderConfig(name="openai", base_url="https://api.openai.com/v1", model="gpt-4o-mini")]
+    models = _discover_with_saved_providers(saved)
+    assert not [m for m in models if m.provider in ("lmstudio", "custom")]
+
+
+def test_saved_provider_model_deduped_against_builtin_model():
+    # A custom record naming a model the OpenAI section already lists keeps
+    # the single built-in entry, so ConfigModal option IDs stay unique.
+    saved = [ProviderConfig(name="custom", base_url="http://localhost:8000/v1", model="gpt-4o-mini")]
+    models = _discover_with_saved_providers(saved)
+    ids = [m.model_id for m in models]
+    assert ids.count("gpt-4o-mini") == 1
+    assert next(m for m in models if m.model_id == "gpt-4o-mini").provider == "openai"
+
+
+def test_saved_provider_with_blank_model_is_skipped():
+    saved = [ProviderConfig(name="lmstudio", base_url="http://localhost:1234/v1", model="  ")]
+    models = _discover_with_saved_providers(saved)
+    assert not [m for m in models if m.provider == "lmstudio"]
+
+
+def test_saved_providers_from_real_storage_are_discovered(tmp_path):
+    from argus.providers.storage import ProviderStorage
+
+    storage = ProviderStorage(config_dir=tmp_path / "cfg")
+    storage.save_provider(
+        ProviderConfig(name="lmstudio", base_url="http://localhost:1234/v1", model="local-model")
+    )
+    storage.save_provider(
+        ProviderConfig(name="custom", base_url="http://localhost:8000/v1", model="custom-model")
+    )
+    with patch("argus.providers.discovery.is_antigravity_cli_available", return_value=False):
+        with patch("argus.providers.storage.ProviderStorage.get_api_key", return_value=None):
+            models = discover_all_models(storage=storage, force_refresh=True, probe_ollama=False)
+    found = {m.provider: m.model_id for m in models if m.provider in ("lmstudio", "custom")}
+    assert found == {"lmstudio": "local-model", "custom": "custom-model"}
+    assert all(m.is_available for m in models if m.provider in ("lmstudio", "custom"))
